@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "url": "https://raw.githubusercontent.com/yanyangwogwo-ctrl/teaching-job-radar-claude/main/dist/data/jobs.json",
+  "repository": "https://github.com/yanyangwogwo-ctrl/teaching-job-radar-claude",
+  "workflow": "https://github.com/yanyangwogwo-ctrl/teaching-job-radar-claude/actions/workflows/daily.yml"
+}

@@ -1,0 +1,102 @@
+# 實作規格
+
+版本：2026-11-17（香港時間）；由使用者最初 13 個來源擴展至 33 個官方招聘來源。
+
+## 1. 架構
+
+Python 3.12 每日讀取公開來源 → `data/store.json` 原子寫入 → 產生 JSON／CSV → 靜態 HTML／CSS／JavaScript dashboard。通知使用持久化 outbox 和 Discord webhook。雲端模式由 GitHub Actions 執行及提交資料，Sites 網頁讀取公開 raw GitHub JSON；不需要常駐伺服器或付費 AI 模型。
+
+這是一個單一使用者／單一寫入程序的資料集。雲端排程設 concurrency，禁止同時寫入；本機須依序執行。若將來有多人編輯、頻密寫入或大量資料，應遷移至 SQL 資料庫。
+
+## 2. 來源
+
+完整官方 URL、host allowlist、讀取方式及說明以 `config/sites.yaml` 為準。33 個來源已加入每日檢查，其中未能驗證廣告格式的來源只核對連線並明示未完成；接入不等於每輪成功，實際狀態以雲端結果為準。完整成功仍要求清單、分頁和預期詳情均完整；但來源另記 `listing_complete`、`capability` 及 `severity`。已知只有清單／部分平台未接入／需手動來源保持有限覆蓋警告；額外讀取故障仍是 error。`listing_complete` 只有解析器有完整清單證據才可設為真，不從舊正文或固定數量差額推斷。
+
+嶺南使用官方頁面提供的匿名工作階段，讀取公開搜尋及廣告 API。只接受指定院校、匿名使用者與 API 主機；token 不寫入資料或日誌，不加入 session 預設標頭，也不發往 robots.txt。清單日期按已確認的 en-US M/D/YYYY 解析；不用內部管理日期或 description 佔位文字。實際請求遵守 10 秒間隔；完整重讀仍可能需約 17 分鐘，日常可重用未過期的已核實詳情，不能以加快頻率縮短時間。
+
+樹仁採已更新附件的英文官方清單；PDF 檔名日期仍不當作刊登日。恒生使用官方英文清單連到公開廣告，排除院校介紹及申請登入頁；遇 robots／連線失敗仍停止。中大官方總數與回傳數量的差異亦出現在單頁部門搜尋，不能單靠改分頁迴圈消除，繼續明示部分完成。
+
+HKUST 舊 PeopleSoft 平台經一般匿名 cookies、官方重新導向及公開 TargetContent frame 提供內文；只為官方主機明確允許 HTTPS 8044 port，並核對 frame 主機、頁面及職位編號。Interfolio 部分仍保留清單及未完成提示。
+
+HKUST 清單遇非拒絕性連線／讀取故障時，可依保存的官方廣告連結重新讀取獨立舊平台的詳情。只將真正重新讀到的廣告交給資料合併；清單分頁數為零，整批始終 partial，明示可能遺漏新增職位，不將未讀到的舊記錄判為消失。存取驗證／拒絕不走此備援。
+
+來源格式包括同頁摺疊區塊、HTML 清單＋詳情、PDF、PageUp、Oracle Recruiting 公開 JSON、Taleo 唯讀搜尋 POST＋資料字串。從不提交申請表。
+
+通用 HTML 模組支援 YAML selectors；不同平台不會只靠 URL 猜測。空白、驗證頁、找不到 selectors、無法確認的零結果均不是成功。
+
+## 3. 資料契約
+
+職位必要欄位：`id, source_id, institution, title, reference, url, source_url, department, employment_type, posted_date, deadline, deadline_type, deadline_raw, description, detail_complete, detail_verified_at, detail_refresh_failed, detail_from_cache, role, subjects, score, evidence, matches, first_seen, last_seen, changed_at, status, missing_count`。
+
+- 穩定 ID：來源群組＋官方編號的 hash；無編號才用正規化網址。不能用標題或全文 hash 當職位 ID。HKBU 主站與 SCE 的觀測分開保存，避免某來源移除另一來源的記錄。
+- `posted_date` 只採用官方明示刊登日期；不從編號、URL、PDF 檔名或「30+ days ago」推算。
+- ISO 時間戳先轉香港時間，再取日期；日期欄位本身不加時區。網站沒有日期則顯示 `first_seen`，標明「首見」。
+- `deadline_type` 可為 `closing, review, until-filled, screening-or-closing, unknown`。開始審閱、下架日期和持續招聘不等於截止日期。Taleo 的 unposting 額外保存為 `unposting_raw`，不拿來推斷截止。
+- `content_hash` 追蹤廣告內容改動；不把每次 last_seen 更新當內容變更。
+- 詳情不完整時保留過去已驗證的內文及日期，不用空欄位覆蓋。
+- 超過香港當日的明確截止日期 → closed。截止當日仍顯示 open；不猜測未提供的截止時間。即使爬取失敗，已知期限仍會生效。
+- 連續三次清單完整、非異常的檢索找不到 → missing；個別詳情讀取失敗不會阻止已確認完整清單的消失計數。數量突降超過 60%、未確認零空缺或分頁不完整不增加消失計數。重新找到會恢復 open（除非已過明確截止日）。
+- 舊記錄及歷史不刪除；正式 `store.json` 包括完整記錄、歷史及通知收據。
+- `jobs.json` 提供最近30日的較小資料集及 `meta.archive` 描述；`jobs-archive.json` 保留完整公開職位記錄。兩者的匯出時間／generation 必須一致，介面擴闊範圍時才載入完整檔。歷史讀取失敗要明示，不能把不完整結果宣稱為全部。
+- `detail_verified_at` 記錄最後實際核實詳情時間，`detail_from_cache` 與當輪 `last_seen` 分開；失敗不刷新核實日期。
+
+## 4. 新職位與相關度
+
+比對「新出現」使用穩定 ID；顯示和篩選新舊日期採用刊登日期，缺少時用首見。首次有資料的來源建立安靜基準；網站失敗而取得零筆，不建立基準。來源首次部分成功所取得的資料也是基準，尚未讀到的其他廣告將來可能以新發現記錄處理。
+
+科目由 `preferences.yaml` 字词比對，回傳命中詞和內文節錄。最高科目權重加上兼職教學角色 20 分，上限 100；必須通過角色、聘用類型、院校及排除規則。分數不是獲聘機率，未推斷使用者是否完全符合學歷要求。
+
+排除泛指學位的 Doctor／Master of Philosophy、teaching philosophy，以及平等機會／倫理操守等通用頁尾，減少誤報。英文用字界線，不把 chair 當 AI。一般 engineering／machine learning 不會單憑 AI 進入通知。規則仍可能誤判，提供原文證據讓使用者核對。
+
+## 5. 介面
+
+- 關鍵字空格／逗號分隔、引號詞組、AND／OR、`-` 排除；語法常駐顯示。
+- 院校獨立複選，全部取消代表零院校，不偷偷恢復全選。
+- 日期上下界包括當日；未知截止在排序最後，不能通過指定截止區間。
+- 搜尋頁提供 `presetEnabled` 開關；「預設條件」分頁編輯 `subjectKeywords`、`roleKeywords`、`presetExcludeKeywords` 及 `partTimeOnly`。科目任一 OR AND 職位名稱任一 OR；科目比對職位名、部門與內文（清理哲學學位、一般招聘頁尾及非教學的批判思考能力要求），職位名稱只比對標題。預設排除字詞以逗號（中英文皆可）或換行分隔，保留詞組空格，按搜尋職位名、部門、科目與完整內文的相同規則比對，任一命中即排除；原始預設及缺少此欄的舊常用搜尋均留空。關閉開關會暫停四項預設限制，保留內容；手動 query／搜尋頁排除／院校／日期／狀態仍適用。
+- 舊分組常用搜尋原樣保留，包括空欄。合併版本則以常見職位詞分組，其餘作科目；非空但缺組時補上原始預設，空合併欄保留為兩組皆空。原有詞串／匹配方式保留於 legacyMergedPreset 並在分頁提示核對，不覆寫原 localStorage 記錄。統計及來源警告維持精簡排版；正式通知評分規則獨立。
+- 預設 `sort=newest`，採刊登／首見日由新到舊；預設最近7日，可選3／7／14／30日或全部，以香港當日計算並包含當日。取消固定兩個月上限；「全部」取消刊登年齡限制，保留其他日期／狀態篩選。舊刊登日不能因首見新而通過；所有歷史仍保存。舊常用搜尋缺少新欄位時採7日；若已有明確起止日期，採全部視窗並保留其日期限制，不覆寫自訂範圍。
+- 缺內文職位可用已知標題／部門搜尋，介面明示資料有限；正式Discord相關職位通知仍要求已核實詳情。
+- 官方原文／招聘連結放在職位卡、來源卡及詳情視窗頂端右側。
+- 儲存搜尋存在瀏覽器，只是個人篩選偏好。它不改變服務端正式 Discord 設定。
+- 每日時間選單讀取 GitHub 工作流程的單一 daily cron，UTC 轉香港時間，或直接使用 Asia/Hong_Kong。選定時間後先重新讀取最新工作流程，只替換 cron 行，複製供擁有者於 GitHub 編輯頁確認。只有重新讀取已提交的工作流程才能顯示已儲存；不以 localStorage 或本地選擇冒充正式排程。網站不持有 GitHub 寫入 token，公開訪客不能直接寫入。
+- HTML 字串轉義、只提供 HTTPS 原文連結、新分頁 noopener；不把外部 HTML 原樣插入。
+- 手機版可摺疊院校／日期篩選，職位詳細資料用原生對話框，支援鍵盤。
+- 雲端資料讀取失敗時使用有標示的網站保存版本，不更改原本檢索時間。最近檢索採用 last_run.finished_at，不能用單純匯出的 generated_at 充當爬取時間。
+- CSV 含 BOM，公式前綴會轉義。
+
+## 6. 通知可靠性
+
+每個新職位最多一個 outbox event。職位過期或不再匹配則不送；詳情暫時失效則延後。已確認送出不重送；未確認保留待送。使用 `wait=true` 要求 Discord 回傳訊息 ID；限制訊息长度及禁用 mentions。
+
+先提交待送資料，再送訊息，最後提交逐則本機保存的確認記錄。Discord 與 Git repository 之間沒有跨服務交易；回覆丟失／收據提交前程序中斷可造成重送，不能宣稱 exactly-once。
+
+推送遇到同期程式更新時，先核對遠端沒有修改 `data/store.json` 或 `dist/data`，才把本輪資料提交移到最新程式之後重試，最多三次；同期資料更新或分支改寫則停止，從不強制推送。工作流程結尾保存七日 checkpoint，涵蓋職位、歷史及已有發送確認，避免推送失敗後只剩日誌。
+
+每日 schedule 一律檢查全部啟用來源。手動 workflow_dispatch 可指定 sources；程式 push 可用唯一 `Recheck-Sources:` 提交訊息行選擇重試來源。字串只接受來源 ID、空格及逗號，使用 subprocess 參數陣列，不作 shell 展開；monitor.run 再核對所有 ID。指定來源檢索不改動其他來源狀態。
+
+來源問題保留逐來源狀態；發送按香港日期合併為每日最多一份已確認摘要。新增／改變／恢復事件可另作合併通知，長期相同問題不再逐來源逐日轟炸。舊待送事件會合併與略過已恢復來源；聚合訊息本身亦保存待送／確認狀態，發送失敗可重試。
+
+工作流程對已知有限能力警告保持可觀察性；只有實際來源錯誤、通知錯誤或管線失敗產生非零結果。資料保存及收據保存失敗仍是Failure，不能用降級來源狀態掩蓋。每日爬取前同時執行Python及前端測試。
+
+排程維持香港時間約08:17。`schedule_execution` 只對schedule事件記錄最近預定時段、檢索啟動及近似相隔秒數；以啟動前最近一次每日cron計算，包含工作流程前置步驟，不能據此重建超過24小時的漏跑或精確GitHub排隊時間。手動與push沒有預定延遲。排程完全停止需要獨立 heartbeat 服務，介面明示尚未啟用與是否過時。
+
+## 7. 輸入與網路
+
+只讀 allowlist 上的公開 HTTPS 主機和指定唯讀搜尋 POST。每主機間隔至少 1.1 秒，採 robots 的更長 Crawl-delay。每來源請求數上限 400、每頁 6 MB、分頁上限、timeout、最多三個来源並行。robots 404／410 可繼續；其他主機的401／403／429、驗證內容、無法確認規則則停止。已核實公開檔案主機可逐一設 `robots_unavailable_hosts`，僅對無驗證訊號的robots 403使用RFC9309 unavailable處理；不影響廣告正文的403、明確Disallow或其他主機。GET的502／503／504可再試兩次（最多三次），亦適用robots；退避2秒、4秒加少量抖動，仍遵守原站間隔及請求總上限。合理Retry-After最多等30秒，要求更久便停止本次，不能提早重試。POST、202、拒絕及驗證不按此重試；robots 5xx重試後仍失敗便停止。通用 parser 支援 wildcard、終點 `$`、最長路徑及 Allow 同長優先，失敗快取保持拒絕。[robots 標準](https://www.rfc-editor.org/rfc/rfc9309)
+
+教大對 `www.eduhk.hk` 明確啟用 `SSL_OP_LEGACY_SERVER_CONNECT`，不啟用較廣的 `ALLOW_UNSAFE_LEGACY_RENEGOTIATION`、不降低security level，憑證及主機名稱驗證仍必須通過。此相容性選項仍有舊式重新協商的安全取捨，不能稱為完全不改變TLS保護；其他主機不可從YAML任意擴張此例外。HPSHCC憑證失敗在未取得證據前保留診斷，不加入未驗證CA。
+
+所有密鑰只透過環境變數。公開匯出不包含 webhook、HTTP cookies 或 credential；原始私人書籤不在專案內。
+
+## 8. 詳情快取
+
+清單每日重新讀取，詳情快取以來源及穩定職位身份配對；僅重用曾成功核實、沒有刷新失敗、未過期且清單指紋一致的內容。新增、清單欄位變動、缺內文、上次失敗及臨近明確截止日期的職位需要重讀。預設最長7日，來源 `detail_cache_days` 可設1至7日；明確截止距香港當日3日內、已過截止、舊狀態為closed／missing均需刷新；定期到期重讀保證同網址廣告的修改最遲會再核實。網站未提供變更訊號時不能保證即日發現正文更新。
+
+請求限速、robots及來源上限仍有效；快取不是繞過原站限制的方法。不把整個來源請求成功率、700次詳情讀取或幾分鐘完成當成已量測保證，實際請求及快取命中按輪記錄。
+
+## 9. 已完成驗證及限制
+
+離線回歸測試覆蓋 AND／OR／排除、日期時區、資料持久化、首次基準、重跑去重、數量突降、消失門檻、暫時詳情失效、已截止處理、robots fail-closed 及 Discord 確認重試。Discord 測試使用 mock，未曾實際向頻道發送。
+
+各來源的已觀察結果及本次修改範圍見 SOURCE_AUDIT.md，最新正式雲端結果見 Actions 及 dashboard。程式回歸測試不代表全部來源現時可讀；單次本機成功亦不代表雲端修復。Discord 端到端驗收要在使用者頻道設定完成後執行。
