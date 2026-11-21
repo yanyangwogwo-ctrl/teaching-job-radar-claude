@@ -24,82 +24,59 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - name: Robots rules, paging and one job page
+      - name: Filtered list without query, paging, and one job page
         run: |
           python - <<'PY'
-          import re, time, requests
+          import re
           from collections import Counter
           from pathlib import Path
-          from urllib.robotparser import RobotFileParser
+          from urllib.parse import urlencode
           from bs4 import BeautifulSoup
           from monitor.run import read_config
-          from monitor.http import PublicClient, CrawlError
+          from monitor.http import PublicClient
 
           sources, _ = read_config(Path('.'))
           source = dict(next(s for s in sources if s['id'] == 'hku'))
           source['url'] = 'https://jobs.hku.hk/jobs/search'
-          source['min_request_interval'] = 15
           client = PublicClient(source)
-
-          robots = requests.get('https://jobs.hku.hk/robots.txt', headers={'User-Agent': client.session.headers.get('User-Agent', '')}, timeout=30)
-          print('ROBOTS_STATUS', robots.status_code)
-          for line in robots.text.splitlines()[:80]:
-              print('ROBOTS', line)
-          parser = RobotFileParser()
-          parser.parse(robots.text.splitlines())
-          agent = client.session.headers.get('User-Agent', '*')
-          for url in ('https://jobs.hku.hk/jobs/search', 'https://jobs.hku.hk/jobs/search?page=2',
-                      'https://jobs.hku.hk/jobs/search?page=2&sort=newest_first',
-                      'https://jobs.hku.hk/jobs/part-time-senior-technical-officer-hong-kong-central-western',
-                      'https://jobs.hku.hk/en/job/533668/x', 'https://jobs.hku.hk/sitemap.xml'):
-              print('ALLOWED', parser.can_fetch(agent, url), parser.can_fetch('*', url), url)
 
           def flat(text, limit):
               return re.sub(r'\s+', ' ', text)[:limit]
 
-          cards, url, page, started = [], 'https://jobs.hku.hk/jobs/search', 0, time.monotonic()
-          while url and page < 25:
+          url = 'https://jobs.hku.hk/jobs/search?' + urlencode([('employment_type_uids[]', 'a8dfe5e6ea2dd00e085f603d73791c5b'), ('employment_type_uids[]', 'cec6687bdfba952002d3eeba8babee99')])
+          wanted, page = [], 0
+          while url and page < 4:
               page += 1
-              try:
-                  response = client.response(url)
-              except CrawlError as error:
-                  print('PAGE_ERROR', page, url, error)
-                  break
+              response = client.response(url)
               soup = BeautifulSoup(response.text, 'html.parser')
-              found = soup.select('article.job-search-results-card-col')
-              kinds = Counter()
-              for card in found:
-                  link = card.select_one('.job-search-results-card-title a[href]')
-                  kind = card.select_one('.job-component-employment-type span')
-                  ident = card.select_one('.job-component-requisition-identifier span')
-                  closing = card.select_one('.job-component-closing-on span')
-                  dept = card.select_one('.job-component-department span')
-                  row = (flat(link.get_text(' ', strip=True), 90) if link else None, link['href'] if link else None,
-                         flat(kind.get_text(' ', strip=True), 60) if kind else None, flat(ident.get_text(' ', strip=True), 20) if ident else None,
-                         flat(closing.get_text(' ', strip=True), 40) if closing else None, flat(dept.get_text(' ', strip=True), 70) if dept else None)
-                  cards.append(row)
-                  kinds[row[2]] += 1
+              cards = soup.select('article.job-search-results-card-col')
+              kinds = Counter(flat(c.select_one('.job-component-employment-type span').get_text(' ', strip=True), 60) if c.select_one('.job-component-employment-type span') else None for c in cards)
+              checked = [(i.get('name'), i.get('value'), flat((soup.find('label', attrs={'for': i.get('id')}) or i.parent).get_text(' ', strip=True), 50)) for i in soup.select('input[type=checkbox][checked]')]
               nxt = soup.select_one('a.page-link[rel~=next]')
-              print('PAGE', page, response.status_code, round(time.monotonic() - started), 's', len(found), 'cards', dict(kinds), 'next', nxt['href'] if nxt else None)
-              url = ('https://jobs.hku.hk' + nxt['href']) if nxt and nxt.get('href') else None
-          print('TOTAL_CARDS', len(cards), 'UNIQUE_IDS', len({c[3] for c in cards}), 'NO_ID', sum(1 for c in cards if not c[3]), 'NO_LINK', sum(1 for c in cards if not c[1]))
-          print('KINDS', Counter(c[2] for c in cards))
-          wanted = [c for c in cards if c[2] and re.search(r'part|hour|fraction', c[2], re.I)]
-          for c in wanted:
-              print('WANTED', c)
+              print('PAGE', page, response.status_code, response.url[:200], len(cards), 'cards', dict(kinds))
+              print('CHECKED', checked)
+              print('NEXT', nxt['href'] if nxt else None)
+              for text in soup.find_all(string=re.compile(r'\b\d+\s+(jobs?|results?)\b', re.I))[:3]:
+                  print('COUNT_TEXT', flat(text, 120))
+              if page == 1 and cards:
+                  print('CARD', flat(str(cards[0]), 4000))
+              for card in cards:
+                  link = card.select_one('.job-search-results-card-title a[href]')
+                  wanted.append(link['href'])
+                  print('JOB', flat(link.get_text(' ', strip=True), 80), '|', ' / '.join(flat(s.get_text(' ', strip=True), 50) for s in card.select('.job-component-icon-and-text span')))
+              url = ('https://jobs.hku.hk' + nxt['href']) if nxt and nxt.get('href', '').startswith('/') else (nxt['href'] if nxt and nxt.get('href') else None)
+          print('TOTAL', len(wanted), 'UNIQUE', len(set(wanted)))
           if wanted:
-              response = client.response(wanted[0][1])
+              response = client.response(wanted[0])
               soup = BeautifulSoup(response.text, 'html.parser')
               print('D FINAL', response.url, response.status_code)
               print('D H1', [flat(h.get_text(' ', strip=True), 160) for h in soup.find_all('h1')])
-              for node in soup.select('[class*=job-component]')[:30]:
+              for node in soup.select('li[class*=job-component]')[:20]:
                   print('D COMPONENT', node.get('class'), flat(node.get_text(' ', strip=True), 140))
-              for selector in ('.job-description', '#job-description', '.job-details', '[class*=description]', 'article', 'main'):
-                  node = soup.select_one(selector)
-                  if node:
-                      print('D BLOCK', selector, node.name, node.get('class'), node.get('id'), len(node.get_text(' ', strip=True)), flat(node.get_text(' ', strip=True), 400))
+              for selector in ('.job-description', '#job-description', '[class*=job-description]', '[class*=description]', '.job-details', 'article', 'main'):
+                  for node in soup.select(selector)[:2]:
+                      print('D BLOCK', selector, node.name, node.get('class'), node.get('id'), len(node.get_text(' ', strip=True)), flat(node.get_text(' ', strip=True), 300))
               for script in soup.find_all('script', attrs={'type': 'application/ld+json'}):
-                  print('D JSONLD', flat(script.string or '', 3000))
-              apply = [a['href'] for a in soup.find_all('a', href=True) if re.search(r'apply', a.get_text(' ', strip=True), re.I)]
-              print('D APPLY', apply[:3])
+                  print('D JSONLD', flat(script.string or '', 4000))
+              print('D APPLY', [a['href'] for a in soup.find_all('a', href=True) if re.search(r'apply', a.get_text(' ', strip=True), re.I)][:3])
           PY
