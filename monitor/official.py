@@ -6,7 +6,7 @@ import json
 import re
 import ast
 from datetime import datetime
-from urllib.parse import urljoin, urlsplit, parse_qs, urlencode, unquote
+from urllib.parse import urljoin, urlsplit, parse_qs, parse_qsl, urlencode, unquote
 from zoneinfo import ZoneInfo
 
 from pypdf import PdfReader
@@ -58,41 +58,68 @@ def parse_sfu(source, html):
     return Batch(jobs=require_jobs(jobs, 'SFU'), pages=1)
 
 
+# HKU moved to a new recruitment site on 2026-11-20. Its search page lists
+# cards that carry the same requisition numbers as the old PageUp site, so
+# stored records keep their identity. robots.txt forbids any search URL that
+# carries `query=`, so the configured URL filters by work type only.
+HKU_WORK_TYPES = re.compile(r'part[- ]?time|fractional|hourly', re.I)
+
+
+def hku_page_url(url, page):
+    """The configured filtered search, at a given page, never with `query=`."""
+    bits = urlsplit(url)
+    pairs = [(key, value) for key, value in parse_qsl(bits.query, keep_blank_values=True)
+             if key not in ('page', 'query')]
+    if page > 1:
+        pairs.append(('page', str(page)))
+    return bits._replace(query=urlencode(pairs)).geturl()
+
+
+def _hku_deadline(job, node):
+    closing = text_at(node, '.job-component-closing-on span')
+    date = parse_date(re.sub(r'^closing on:?', '', closing, flags=re.I).strip()) if closing else None
+    if date:
+        job.update(deadline=date, deadline_type='closing', deadline_raw=closing)
+
+
 def parse_hku_list(source, html):
+    """One page of the filtered search: (jobs, whether another page follows,
+    the item counts the active work-type filters report)."""
     soup, jobs = soup_of(html), []
-    for row in soup.select('#search-results-content tr'):
-        anchor = row.select_one('a.job-link[href]')
-        if not anchor:
-            continue
-        cells = row.find_all('td', recursive=False)
-        if len(cells) != 4:
-            raise CrawlError('HKU 職位表格欄位有變。')
-        job = record(source, anchor.get_text(' ', strip=True), urljoin(source['url'], anchor['href']), text_at(row, '.job-externalJobNo'),
-                     department=cells[2].get_text(' ', strip=True), detail_complete=False)
-        stamp = cells[3].select_one('time[datetime]')
-        if stamp:
-            job.update(deadline=local_date(stamp['datetime']), deadline_type='closing', deadline_raw=cells[3].get_text(' ', strip=True))
-        job['employment_type'] = employment_of(job['title'])
+    checked = [clean_text((soup.find('label', attrs={'for': box.get('id')}) or box.parent).get_text(' ', strip=True))
+               for box in soup.select('input[type=checkbox][name="employment_type_uids[]"][checked]')]
+    if not checked or not all(HKU_WORK_TYPES.search(label) for label in checked):
+        raise CrawlError('HKU 兼職／時薪篩選未生效，篩選編號可能已改。', stop_source=True)
+    counts = [int(found.group(1)) for found in (re.search(r'\((\d+) items?\)', label) for label in checked) if found]
+    for card in soup.select('article.job-search-results-card-col'):
+        anchor = card.select_one('.job-search-results-card-title a[href]')
+        reference = text_at(card, '.job-component-requisition-identifier span')
+        if not anchor or not reference:
+            raise CrawlError('HKU 職位卡片欄位有變。')
+        kinds = [clean_text(node.get_text(' ', strip=True)) for node in card.select('.job-component-employment-type span')]
+        if not any(HKU_WORK_TYPES.search(kind) for kind in kinds):
+            raise CrawlError('HKU 篩選結果出現非兼職／時薪職位，篩選可能已失效。', stop_source=True)
+        title = clean_text(anchor.get_text(' ', strip=True))
+        job = record(source, title, urljoin(source['url'], anchor['href']), reference,
+                     department=text_at(card, '.job-component-department span'), detail_complete=False)
+        _hku_deadline(job, card)
+        job['employment_type'] = employment_of(title, ' '.join(kinds))
         jobs.append(job)
-    more = soup.select_one('#search-results a.more-link[href]')
-    return require_jobs(jobs, 'HKU'), urljoin(source['url'], more['href']) if more else None
+    more = soup.select_one('a.page-link[rel~=next][href]') is not None
+    return require_jobs(jobs, 'HKU'), more, counts
 
 
 def parse_hku_detail(job, html):
     soup = soup_of(html)
-    content = soup.select_one('#job-details')
-    if not content or len(content.get_text()) < 100:
+    content = soup.select_one('.job-description')
+    if not content or len(content.get_text(' ', strip=True)) < 100:
         raise CrawlError('HKU 詳情頁的內文格式未能確認。')
     text = body_text(content)
-    title = text_at(soup, '#job-content [itemprop=title]') or job['title']
-    job.update(title=title, description=text, match_text=text, detail_complete=True)
-    job['employment_type'] = employment_of(title, ' '.join(n.get_text(' ', strip=True) for n in soup.select('#job-content .work-type')), text)
-    for item, field in [('datePosted', 'posted_date'), ('validThrough', 'deadline')]:
-        node = soup.select_one(f'#job-content [itemprop={item}] time[datetime]')
-        if node:
-            job[field] = local_date(node['datetime'])
-            if field == 'deadline':
-                job.update(deadline_type='closing', deadline_raw=node.get_text(' ', strip=True))
+    kinds = ' '.join(clean_text(node.get_text(' ', strip=True)) for node in soup.select('.job-component-employment-type span'))
+    job.update(description=text, match_text=text, detail_complete=True)
+    job['employment_type'] = employment_of(job['title'], kinds, text)
+    if not job.get('deadline'):
+        _hku_deadline(job, soup)
     if not job.get('deadline'):
         apply_deadline(job, text)
     return job
@@ -435,15 +462,22 @@ def collect_official(source, client):
         result.jobs = list(indexed.values())
         detail = lambda job: parse_hkbu_detail(job, json.loads(client.get(api + 'recruitingCEJobRequisitionDetails/' + job['reference'] + '?expand=all&onlyData=true')))
     elif adapter == 'hku':
-        url, visited, indexed = source['url'], set(), {}
+        indexed, counts, page = {}, [], 1
         try:
-            while url:
-                if url in visited or len(visited) >= 20:
-                    raise CrawlError('HKU 分頁循環或超過上限。', stop_source=True)
-                visited.add(url)
-                jobs, url = parse_hku_list(source, client.get(url))
+            while True:
+                if page > 20:
+                    raise CrawlError('HKU 分頁超過上限。', stop_source=True)
+                jobs, more, found = parse_hku_list(source, client.get(hku_page_url(source['url'], page)))
+                counts = counts or found
                 indexed.update({j['id']: j for j in jobs})
                 result.pages += 1
+                if not more:
+                    break
+                page += 1
+            # The two filters overlap, so the union lies between the larger
+            # count and their sum; anything else means the list was cut short.
+            if counts and not max(counts) <= len(indexed) <= sum(counts):
+                raise CrawlError(f'HKU 清單數目未能核對：篩選顯示 {"＋".join(map(str, counts))} 個，讀到 {len(indexed)} 個。')
             result.listing_complete = True
         except CrawlError as error:
             result.complete = False

@@ -58,17 +58,20 @@ sources:
   institution: HKU
   name: 香港大學
   group: hku
-  url: https://jobs.hku.hk/en/filter/?search-keyword=&work-type=fractional%20%2f%20part-time&work-type=hourly-paid
+  # New recruitment site since 2026-11-20; the filter is Fractional / Part-time + Hourly-paid.
+  # robots.txt forbids any search URL with query=, so never add one.
+  url: https://jobs.hku.hk/jobs/search?employment_type_uids%5B%5D=a8dfe5e6ea2dd00e085f603d73791c5b&employment_type_uids%5B%5D=cec6687bdfba952002d3eeba8babee99
   adapter: hku
   enabled: true
   allowed_hosts:
   - jobs.hku.hk
-  # 網站用 AWS WAF：約 5 次以上請求／5 分鐘、冇驗證 token 就要求瀏覽器驗證（HTTP 202）。
+  # 網站用 AWS WAF：約 5 次以上請求／5 分鐘、冇驗證 token 就要求瀏覽器驗證（HTTP 202）；
+  # 新系統一樣（11月21日以 15 秒間隔，第 7 個請求被要求驗證）。robots.txt 要求最少 5 秒。
   # 每 80 秒一個請求、每輪最多 6 則詳情、詳情沿用 21 日；清單欄位一改即重讀。唔會解驗證。
   min_request_interval: 80
   max_detail_fetches: 6
   detail_cache_days: 21
-  notes: PageUp 兼職／時薪清單及完整分頁；網站限制讀取頻率，詳情放慢並分批更新，遇到驗證要求即停止並保留舊資料。
+  notes: 2026年11月20日起改用新招聘系統；讀取兼職／時薪篩選清單（以篩選數目核對完整），職位編號沿用舊系統。網站限制讀取頻率，詳情放慢並分批更新，遇到驗證要求即停止並保留舊資料。
 - id: polyu
   institution: PolyU
   name: 香港理工大學
