@@ -1,0 +1,136 @@
+name: Diagnose HKU listing (temporary)
+
+# Reads HKU's new recruitment site (since 2026-11-20) a few times, paced 80 s
+# apart, to learn its filters, result cards, paging and job pages. Read-only;
+# removed once the new reader is in place.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/diagnose-hku.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  look:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Explore the new site
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          from urllib.parse import urlencode, urlsplit
+          from bs4 import BeautifulSoup
+          from monitor.run import read_config
+          from monitor.http import PublicClient
+
+          sources, _ = read_config(Path('.'))
+          source = dict(next(s for s in sources if s['id'] == 'hku'))
+          source['url'] = 'https://jobs.hku.hk/jobs/search'
+          client = PublicClient(source)
+
+          def flat(text, limit):
+              return re.sub(r'\s+', ' ', text)[:limit]
+
+          def job_links(soup):
+              seen = []
+              for a in soup.find_all('a', href=True):
+                  path = urlsplit(a['href']).path
+                  if path.startswith('/jobs/') and path not in ('/jobs/search',) and a['href'] not in seen:
+                      seen.append(a['href'])
+              return seen
+
+          def card_of(soup, href):
+              anchor = soup.find('a', href=href)
+              node = anchor
+              for _ in range(6):
+                  parent = node.parent
+                  if parent is None or len({x['href'] for x in parent.find_all('a', href=True) if urlsplit(x['href']).path.startswith('/jobs/')} - {'/jobs/search'}) > 1:
+                      break
+                  node = parent
+              return node
+
+          def report(tag, response):
+              soup = BeautifulSoup(response.text, 'html.parser')
+              keep = ('server', 'content-type', 'via', 'x-cache', 'x-powered-by', 'cf-ray', 'x-amzn-waf-action', 'x-amz-cf-pop')
+              print(f'{tag} FINAL', response.url, response.status_code, {k: v for k, v in response.headers.items() if k.lower() in keep})
+              links = job_links(soup)
+              print(f'{tag} JOB_LINKS', len(links))
+              for text in soup.find_all(string=re.compile(r'\b\d+\s+(jobs?|results?|positions?|vacanc)', re.I))[:5]:
+                  print(f'{tag} COUNT_TEXT', flat(text, 120))
+              for a in soup.find_all(['a', 'button']):
+                  marker = ' '.join(str(v) for v in a.attrs.values())
+                  if re.search(r'page|next|more|pagination', marker, re.I) and 'cookie' not in marker.lower():
+                      print(f'{tag} PAGER', a.name, {k: v for k, v in a.attrs.items() if k in ('href', 'class', 'data-action', 'value', 'name', 'aria-label', 'rel')}, flat(a.get_text(' ', strip=True), 40))
+              return soup, links
+
+          # 1. Unfiltered search page.
+          response = client.response('https://jobs.hku.hk/jobs/search')
+          soup, links = report('A', response)
+          groups = {}
+          for box in soup.select('input[type=checkbox]'):
+              name = box.get('name')
+              label = soup.find('label', attrs={'for': box.get('id')})
+              text = label.get_text(' ', strip=True) if label else flat(box.parent.get_text(' ', strip=True), 60)
+              groups.setdefault(name, []).append((box.get('value'), text))
+          for name, items in groups.items():
+              first = soup.find('input', attrs={'name': name})
+              heading = first.find_parent(['fieldset', 'section', 'div'])
+              for _ in range(3):
+                  if heading is not None and heading.find(['h2', 'h3', 'h4', 'h5', 'legend', 'button', 'span']):
+                      break
+                  heading = heading.parent if heading is not None else None
+              title = heading.find(['h2', 'h3', 'h4', 'h5', 'legend', 'button']) if heading is not None else None
+              print('GROUP', name, '|', flat(title.get_text(' ', strip=True), 60) if title else '?', '|', len(items))
+              if name != 'department_uids[]':
+                  for value, text in items:
+                      print('  OPTION', name, value, '|', text)
+          if links:
+              print('A CARD', flat(str(card_of(soup, links[0])), 2500))
+          form = soup.find('form', class_='job-search-results-form') or soup.find('form')
+          hidden = [(i['name'], i.get('value', '')) for i in form.find_all('input', attrs={'type': 'hidden'}) if i.get('name')] if form else []
+          print('HIDDEN', hidden)
+
+          # 2. Part-time / hourly filter, as the form would submit it.
+          wanted = [value for value, text in groups.get('employment_type_uids[]', []) if re.search(r'part|hour|fraction|sessional|temporary', text, re.I)]
+          print('WANTED', wanted)
+          query = hidden + [('employment_type_uids[]', value) for value in wanted] + [('query', '')]
+          filtered_url = 'https://jobs.hku.hk/jobs/search?' + urlencode(query)
+          response = client.response(filtered_url)
+          soup2, links2 = report('B', response)
+          for href in links2[:40]:
+              print('B TITLE', flat(soup2.find('a', href=href).get_text(' ', strip=True), 110), '|', href[:150])
+
+          # 3. Second page of the filtered search.
+          page2 = 'https://jobs.hku.hk/jobs/search?' + urlencode([(k, '2' if k == 'page' else v) for k, v in query])
+          response = client.response(page2)
+          soup3, links3 = report('C', response)
+          print('C NEW_LINKS', len(set(links3) - set(links2)))
+
+          # 4. One job page.
+          if links2:
+              target = links2[0] if links2[0].startswith('http') else 'https://jobs.hku.hk' + links2[0]
+              response = client.response(target)
+              page = BeautifulSoup(response.text, 'html.parser')
+              print('D FINAL', response.url, response.status_code)
+              print('D H1', [flat(h.get_text(' ', strip=True), 160) for h in page.find_all('h1')])
+              for pattern in ('Ref', 'Closing', 'Close', 'Department', 'Work type', 'Employment', 'Posted', 'Advertised', 'Apply', 'Salary', 'Faculty', 'Category'):
+                  for node in page.find_all(string=re.compile(pattern, re.I))[:2]:
+                      holder = node.parent.parent if node.parent is not None else None
+                      print('D FIELD', pattern, '|', flat(str(holder), 500))
+              main = page.find('main') or page.body
+              print('D MAIN_TEXT_LEN', len(main.get_text(' ', strip=True)) if main else 0)
+              print('D MAIN_START', flat(main.get_text(' ', strip=True), 1200) if main else '')
+              for script in page.find_all('script', attrs={'type': 'application/ld+json'}):
+                  print('D JSONLD', flat(script.string or '', 2500))
+          PY
