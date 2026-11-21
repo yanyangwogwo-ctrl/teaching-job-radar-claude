@@ -20,7 +20,7 @@
 
 1. 到 <https://cron-job.org> 註冊（免費），然後 **Create cronjob**。
 2. **Common**：
-   - Title：`教席雷達每日檢索`
+   - Title：`Teaching Job Radar daily check`
    - URL：`https://api.github.com/repos/yanyangwogwo-ctrl/teaching-job-radar-claude/actions/workflows/daily.yml/dispatches`
    - Execution schedule：**Every day at 08:17**；時區揀 **Asia/Hong_Kong**
 3. **Advanced**：

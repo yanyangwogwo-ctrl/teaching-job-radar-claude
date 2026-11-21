@@ -1,8 +1,8 @@
-# 教席雷達 · 大專職位監察
+# Teaching Job Radar · Hong Kong Tertiary Job Monitor
 
-> **Claude 獨立版**：源自 [yanyangwogwo-ctrl/teaching-job-radar](https://github.com/yanyangwogwo-ctrl/teaching-job-radar)（ChatGPT 版）2026年11月20日嘅資料，加上 Claude 嘅可靠性修訂。兩個版本各自檢索、各自出網站，互不影響。
+> **Claude edition**: based on [yanyangwogwo-ctrl/teaching-job-radar](https://github.com/yanyangwogwo-ctrl/teaching-job-radar) (the ChatGPT edition) and its data as of 20 November 2026, plus Claude's reliability fixes. The two editions run their own daily checks and their own websites, independently of each other.
 
-每日查看香港大專官方招聘頁，集中搜尋教學機會；網頁預設不限制兼職，正式通知規則獨立設定。這個版本已用真實公開資料測試；介面上的「來源狀態」是實際結果，不會把讀取失敗當成沒有新職位。
+Checks the official recruitment pages of Hong Kong tertiary institutions every day, focusing on teaching posts. The website does not limit results to part-time posts by default; notification rules are set separately. This edition has been tested against real public data: the 「來源狀態」 (source status) panel shows actual results and never treats a failed read as "no new jobs".
 
 ## 現在可以做甚麼
 
@@ -46,7 +46,7 @@ python -m monitor.run
 2. 檢查 `dist/feed-config.json` 指向這個 repository 的 `main/dist/data/jobs.json`；預設已指向 `yanyangwogwo-ctrl/teaching-job-radar-claude`。
 3. 建立 Discord 頻道的 webhook，將完整網址存進 **Settings → Secrets and variables → Actions → New repository secret**，名稱用 `DISCORD_WEBHOOK_URL`。密鑰不要貼在公開頁面、程式或聊天中。
 4. 確認 repository 允許 Actions 的 `GITHUB_TOKEN` 寫入內容。工作流程只會推送資料記錄；若分支保護拒絕 bot，需由擁有者配置允許的寫入方式，不要強制推送。
-5. 初次上傳程式會觸發一次檢索。之後可用 **Actions → Daily vacancy monitor → Run workflow** 手動執行；每日排程會獨立運作。完成後重新開啟教席雷達，檢查來源狀態及最近執行時間。
+5. 初次上傳程式會觸發一次檢索。之後可用 **Actions → Daily vacancy monitor → Run workflow** 手動執行；每日排程會獨立運作。完成後重新開啟 Teaching Job Radar，檢查來源狀態及最近執行時間。
 
 手動執行時，`sources` 留空會檢查全部；亦可輸入 `hsu` 或 `hsu,hkust`，只重試指定院校。其他院校的資料及來源狀態會保留；每日定時執行仍然檢查全部啟用來源；明確標記需手動的來源不會繞過原站限制。
 
@@ -56,7 +56,7 @@ python -m monitor.run
 
 工作流程預設每天香港時間約 **08:17** 執行一次。**GitHub 內建排程自 2026 年 8 月下旬起經常遲 3–10 小時**（本專案 11 月實測遲約 6.5–7.7 小時）。建議按 [`SETUP_zh-HK.md`](SETUP_zh-HK.md) 加一個外部準時觸發（例如 cron-job.org 呼叫 `workflow_dispatch`，`reason` 填 `schedule`）；GitHub 排程會變成後備：當日預定時間（提早兩小時起計）之後已完成完整檢索，後備觸發就會略過，唔會一日讀兩次。排程記錄會保存實際檢索啟動時間，以及與最近一個預定時段相隔多久。這是包含前置安裝及測試時間的近似值，不是 GitHub 提供的精確排隊時間；超過一日的漏跑需靠資料新鮮度及獨立監察判斷。手動／程式更新觸發不會顯示虛構延遲。GitHub 排程可能延遲；長期沒有 repository 活動也可能被停用。請保留必要的失敗通知，並定期確認頁面更新時間。[GitHub 排程說明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
-日常使用：[教席雷達（Claude 版）](https://yanyangwogwo-ctrl.github.io/teaching-job-radar-claude/)，由 GitHub Pages 發布。網頁載入時直接向 GitHub 取得最新資料（可能有數分鐘快取）；每次檢索完成或介面有改動，`pages.yml` 會自動重新發布網站，唔使人手發布。任何暫時無法讀取最新資料的情況都會提示。
+日常使用：[Teaching Job Radar (Claude edition)](https://yanyangwogwo-ctrl.github.io/teaching-job-radar-claude/)，由 GitHub Pages 發布。網頁載入時直接向 GitHub 取得最新資料（可能有數分鐘快取）；每次檢索完成或介面有改動，`pages.yml` 會自動重新發布網站，唔使人手發布。任何暫時無法讀取最新資料的情況都會提示。
 
 ### 在網頁調整每天時間
 
